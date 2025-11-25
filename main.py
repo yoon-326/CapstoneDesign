@@ -8,7 +8,7 @@ from ultralytics import YOLO
 try:
     from picamera2 import Picamera2
 except ImportError:
-    print("❌ 'picamera2' 라이브러리가 없습니다. 설치해주세요.")
+    print("'picamera2' 라이브러리가 없습니다. 설치해주세요.")
     exit()
 
 # ==========================================
@@ -31,15 +31,14 @@ REALITY_SCALE = 1.0
 # [모듈 0] 카메라 초기화 (사용자 코드 반영)
 # ==========================================
 def init_camera():
-    print("📷 PiCamera2 초기화 중...")
+    print("PiCamera2 초기화 중...")
     picam2 = Picamera2()
     
-    # ★ 사용자님이 주신 코드 방식 적용 (해상도는 640x480 권장, 포맷은 BGR)
     config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "BGR888"})
     picam2.configure(config)
     picam2.start()
     
-    print("✅ 카메라 시작됨! (Warmup 2초)")
+    print("카메라 시작됨! (Warmup 2초)")
     time.sleep(2) # 카메라 안정화 대기
     return picam2
 
@@ -55,7 +54,7 @@ def run_calibration(picam2):
     def mouse_callback(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             if len(clicked_points) < 4:
-                print(f"📍 포인트 {len(clicked_points)+1} 입력: [{x}, {y}]")
+                print(f"포인트 {len(clicked_points)+1} 입력: [{x}, {y}]")
                 clicked_points.append([x, y])
 
     window_name = "Calibration"
@@ -178,7 +177,7 @@ def draw_separate_radar(objects, width=400, height=400, current_alert="Safe"):
 # [모듈 4] 메인 시스템
 # ==========================================
 def run_system(picam2, H):
-    print("\n🚀 시스템 가동! (종료: q, 리셋: r)")
+    print("\n시스템 가동! (종료: q, 리셋: r)")
     model = YOLO(MODEL_PATH) 
 
     while True:
@@ -266,7 +265,7 @@ def main():
         # 프로그램 종료 시 카메라 안전하게 끄기
         picam2.stop()
         cv2.destroyAllWindows()
-        print("✅ 프로그램 및 카메라 종료 완료")
+        print("프로그램 및 카메라 종료 완료")
 
 if __name__ == "__main__":
     main()
