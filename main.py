@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# ★ 작동 확인된 Picamera2 라이브러리 로드
+# 작동 확인된 Picamera2 라이브러리 로드
 try:
     from picamera2 import Picamera2
 except ImportError:
@@ -22,24 +22,28 @@ REAL_POINTS_BASE = np.array([
     [0.0, 1.0], [0.0, 2.0], [0.0, 3.0], [0.0, 4.0]
 ], dtype=np.float32)
 
-# 거리 공식 계수 (YOLO 맞춤형)
-ALPHA = 1357.44
-BETA = 4.29
-REALITY_SCALE = 1.0
+# 1차 거리 공식 계수 (어깨-골반 기준)
+ALPHA = 830.93
+BETA = 1.09
+
+# 2차 곡선 보정 계수
+CORRECT_A = -0.036743
+CORRECT_B = 1.604291
+CORRECT_C = -2.325063
+
+REALITY_SCALE = 1.0 # 현장 상황에 따른 미세 조정
 
 # ==========================================
-# [모듈 0] 카메라 초기화 (사용자 코드 반영)
+# [모듈 0] 카메라 초기화
 # ==========================================
 def init_camera():
     print("PiCamera2 초기화 중...")
     picam2 = Picamera2()
-    
     config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "BGR888"})
     picam2.configure(config)
     picam2.start()
-    
     print("카메라 시작됨! (Warmup 2초)")
-    time.sleep(2) # 카메라 안정화 대기
+    time.sleep(2)
     return picam2
 
 # ==========================================
@@ -48,7 +52,6 @@ def init_camera():
 def run_calibration(picam2):
     print("\n=== [캘리브레이션 모드] ===")
     print("바닥의 1m, 2m, 3m, 4m 지점을 순서대로 클릭하세요.")
-    
     clicked_points = []
     
     def mouse_callback(event, x, y, flags, param):
@@ -62,9 +65,7 @@ def run_calibration(picam2):
     cv2.setMouseCallback(window_name, mouse_callback)
 
     while True:
-        # ★ Picamera2에서 프레임 가져오기 (작동 확인된 방식)
         frame = picam2.capture_array()
-
         cv2.putText(frame, f"Points: {len(clicked_points)}/4", (20, 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         
@@ -74,12 +75,10 @@ def run_calibration(picam2):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         cv2.imshow(window_name, frame)
-        
         if len(clicked_points) == 4:
             print("설정 완료! 저장 중...")
             cv2.waitKey(1000)
             break
-        
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("취소됨")
             picam2.stop()
@@ -87,7 +86,6 @@ def run_calibration(picam2):
             exit()
 
     cv2.destroyWindow(window_name)
-    
     pts_array = np.array(clicked_points, dtype=np.float32)
     np.save(CONFIG_FILE, pts_array)
     return pts_array
@@ -98,14 +96,11 @@ def run_calibration(picam2):
 def compute_homography(pixel_points):
     pixels = pixel_points.tolist()
     reals = REAL_POINTS_BASE.tolist()
-    
     p1 = pixels[0]
     pixels.append([p1[0] + 100.0, p1[1]]) 
     reals.append([0.5, 1.0]) 
-
     src = np.array(pixels, dtype=np.float32)
     dst = np.array(reals, dtype=np.float32)
-    
     H, _ = cv2.findHomography(src, dst)
     return H
 
@@ -127,18 +122,31 @@ def get_foot_point(keypoints, box_h):
         return avg[0], avg[1] + (box_h * 0.25), "Virtual"
     return None, None, None
 
+# ★ 2차 곡선 보정 함수
+def apply_curve_correction(raw_dist):
+    corrected_dist = (CORRECT_A * (raw_dist ** 2)) + (CORRECT_B * raw_dist) + CORRECT_C
+    return max(0.0, corrected_dist)
+
+# ★ 거리 계산 로직 (보정 적용)
 def calculate_distance_hybrid(u, v, box_h, img_h, H):
     is_clipped = v >= (img_h * 0.95)
+    
     if is_clipped:
-        dist = (ALPHA / box_h) + BETA
+        # 통계 공식 사용 (1차 -> 2차 보정)
+        raw_dist = (ALPHA / box_h) + BETA
         method = "Stat"
-        real_x = (u - (img_h * 1.33 / 2)) * dist * 0.002
+        real_x = (u - (img_h * 1.33 / 2)) * raw_dist * 0.002
     else:
+        # 호모그래피 사용 (1차 -> 2차 보정)
         pt = cv2.perspectiveTransform(np.array([[[u, v]]], dtype=np.float32), H)
         real_x = pt[0][0][0]
-        dist = pt[0][0][1]
+        raw_dist = pt[0][0][1]
         method = "Homo"
-    return real_x, dist * REALITY_SCALE, method
+    
+    # 최종 보정 적용
+    final_dist = apply_curve_correction(raw_dist)
+    
+    return real_x, final_dist * REALITY_SCALE, method
 
 def draw_separate_radar(objects, width=400, height=400, current_alert="Safe"):
     radar = np.zeros((height, width, 3), dtype=np.uint8)
@@ -181,7 +189,6 @@ def run_system(picam2, H):
     model = YOLO(MODEL_PATH) 
 
     while True:
-        # ★ Picamera2 프레임 캡처
         frame = picam2.capture_array()
         h, w = frame.shape[:2]
 
@@ -195,8 +202,6 @@ def run_system(picam2, H):
                 for i, box in enumerate(boxes):
                     x1, y1, x2, y2 = map(int, box)
                     box_h = y2 - y1
-                    
-                    # 사람 박스 그리기
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 1)
 
                     foot_u, foot_v, pose_type = get_foot_point(result.keypoints[i], box_h)
@@ -221,7 +226,6 @@ def run_system(picam2, H):
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                         cv2.putText(frame, f"{status} {dist:.2f}m", (x1, y1-10),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                        
                         if 0 <= foot_u < w and 0 <= foot_v < h:
                             cv2.circle(frame, (int(foot_u), int(foot_v)), 5, (0, 255, 255), -1)
 
@@ -242,8 +246,7 @@ def run_system(picam2, H):
 # 메인 진입점
 # ==========================================
 def main():
-    picam2 = init_camera() # 카메라 켜기
-
+    picam2 = init_camera()
     try:
         while True:
             if os.path.exists(CONFIG_FILE):
@@ -254,18 +257,14 @@ def main():
                     pixel_points = run_calibration(picam2)
             else:
                 pixel_points = run_calibration(picam2)
-            
             H = compute_homography(pixel_points)
-            
             status = run_system(picam2, H)
-            
             if status == "EXIT":
                 break
     finally:
-        # 프로그램 종료 시 카메라 안전하게 끄기
         picam2.stop()
         cv2.destroyAllWindows()
-        print("프로그램 및 카메라 종료 완료")
+        print("종료 완료")
 
 if __name__ == "__main__":
     main()
