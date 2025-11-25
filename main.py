@@ -1,24 +1,52 @@
+import time
+import os
 import cv2
 import numpy as np
-import os
-import time # 시간 지연을 위해 추가
 from ultralytics import YOLO
+
+# ★ Picamera2 라이브러리 로드
+try:
+    from picamera2 import Picamera2
+except ImportError:
+    print("❌ 'picamera2' 라이브러리가 없습니다. 라즈베리 파이가 맞나요?")
+    print("sudo apt install python3-libcamera 명령어로 설치해주세요.")
+    exit()
 
 # ==========================================
 # [설정] 상수 및 파일 경로
 # ==========================================
 CONFIG_FILE = "camera_config.npy"
-MODEL_PATH = "yolov8n.tflite" # 라즈베리 파이용 모델 (없으면 .pt)
+MODEL_PATH = "yolov8n-pose.pt"  # tflite 대신 pt 사용
 
 # 캘리브레이션 할 실제 거리 (1m, 2m, 3m, 4m)
 REAL_POINTS_BASE = np.array([
     [0.0, 1.0], [0.0, 2.0], [0.0, 3.0], [0.0, 4.0]
 ], dtype=np.float32)
 
+# 통계적 거리 공식 계수 (필요시 사용)
+ALPHA = 1357.44
+BETA = 4.29
+REALITY_SCALE = 1.0
+
 # ==========================================
-# [모듈 1] 캘리브레이션 (안전장치 추가)
+# [모듈 0] 카메라 초기화 (Picamera2)
 # ==========================================
-def run_calibration(cap):
+def init_camera():
+    print("📷 Picamera2 초기화 중...")
+    picam2 = Picamera2()
+    
+    # 해상도 640x480, 포맷 BGR (OpenCV와 호환성 위해 RGB가 아닌 BGR로 설정)
+    config = picam2.create_configuration(main={"size": (640, 480), "format": "BGR888"})
+    picam2.configure(config)
+    picam2.start()
+    
+    print("✅ 카메라 시작됨!")
+    return picam2
+
+# ==========================================
+# [모듈 1] 캘리브레이션
+# ==========================================
+def run_calibration(picam2):
     print("\n=== [캘리브레이션 모드] ===")
     print("바닥의 1m, 2m, 3m, 4m 지점을 순서대로 클릭하세요.")
     
@@ -27,7 +55,7 @@ def run_calibration(cap):
     def mouse_callback(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             if len(clicked_points) < 4:
-                print(f"포인트 {len(clicked_points)+1} 입력: [{x}, {y}]")
+                print(f"📍 포인트 {len(clicked_points)+1} 입력: [{x}, {y}]")
                 clicked_points.append([x, y])
 
     window_name = "Calibration"
@@ -35,10 +63,8 @@ def run_calibration(cap):
     cv2.setMouseCallback(window_name, mouse_callback)
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("카메라 영상을 읽을 수 없습니다! (연결 확인 필요)")
-            break
+        # Picamera2에서 프레임 캡처 (numpy array)
+        frame = picam2.capture_array()
 
         cv2.putText(frame, f"Points: {len(clicked_points)}/4", (20, 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
@@ -50,7 +76,6 @@ def run_calibration(cap):
 
         cv2.imshow(window_name, frame)
         
-        # 4개 다 찍으면 자동 저장
         if len(clicked_points) == 4:
             print("설정 완료! 저장 중...")
             cv2.waitKey(1000)
@@ -58,15 +83,11 @@ def run_calibration(cap):
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("취소됨")
+            picam2.stop()
             exit()
 
     cv2.destroyWindow(window_name)
     
-    # [에러 방지] 점을 안 찍고 껐을 경우 처리
-    if len(clicked_points) < 4:
-        print("경고: 점 4개를 다 찍지 않았습니다. 프로그램을 종료합니다.")
-        exit()
-
     pts_array = np.array(clicked_points, dtype=np.float32)
     np.save(CONFIG_FILE, pts_array)
     return pts_array
@@ -75,13 +96,10 @@ def run_calibration(cap):
 # [모듈 2] 호모그래피 행렬 계산
 # ==========================================
 def compute_homography(pixel_points):
-    if len(pixel_points) < 4:
-        return None # 데이터 부족 시 None 반환
-
     pixels = pixel_points.tolist()
     reals = REAL_POINTS_BASE.tolist()
     
-    # 가상 포인트 추가 (1m 지점 기준)
+    # 가상 포인트 추가 (안전장치)
     p1 = pixels[0]
     pixels.append([p1[0] + 100.0, p1[1]]) 
     reals.append([0.5, 1.0]) 
@@ -93,8 +111,44 @@ def compute_homography(pixel_points):
     return H
 
 # ==========================================
-# [모듈 3] 레이더 그리기
+# [모듈 3] 알고리즘 (발 위치 & 거리)
 # ==========================================
+def get_foot_point(keypoints, box_h):
+    """ Pose 모델 결과에서 발 위치 추출 """
+    kps = keypoints.data[0].cpu().numpy()
+    l_ankle, r_ankle = kps[15], kps[16]
+    l_knee, r_knee = kps[13], kps[14]
+
+    # 1. 실제 발목
+    if l_ankle[2] > 0.5 or r_ankle[2] > 0.5:
+        pts = [p[:2] for p in [l_ankle, r_ankle] if p[2] > 0.5]
+        avg = np.mean(pts, axis=0)
+        return avg[0], avg[1], "Real"
+    
+    # 2. 가상 발 (무릎 기반)
+    elif l_knee[2] > 0.5 or r_knee[2] > 0.5:
+        pts = [p[:2] for p in [l_knee, r_knee] if p[2] > 0.5]
+        avg = np.mean(pts, axis=0)
+        return avg[0], avg[1] + (box_h * 0.25), "Virtual"
+    
+    return None, None, None
+
+def calculate_distance_hybrid(u, v, box_h, img_h, H):
+    """ 호모그래피 + 통계 공식 하이브리드 """
+    is_clipped = v >= (img_h * 0.95)
+
+    if is_clipped:
+        dist = (ALPHA / box_h) + BETA
+        method = "Stat"
+        real_x = (u - (img_h * 1.33 / 2)) * dist * 0.002
+    else:
+        pt = cv2.perspectiveTransform(np.array([[[u, v]]], dtype=np.float32), H)
+        real_x = pt[0][0][0]
+        dist = pt[0][0][1]
+        method = "Homo"
+
+    return real_x, dist * REALITY_SCALE, method
+
 def draw_separate_radar(objects, width=400, height=400, current_alert="Safe"):
     radar = np.zeros((height, width, 3), dtype=np.uint8)
     scale_z = height / 5.0
@@ -118,6 +172,7 @@ def draw_separate_radar(objects, width=400, height=400, current_alert="Safe"):
         color = (0, 255, 0)
         if "DANGER" in status: color = (0, 0, 255)
         elif "WARNING" in status: color = (0, 165, 255)
+        
         cv2.circle(radar, (px, py), 10, color, -1)
 
     if "DANGER" in current_alert:
@@ -129,55 +184,53 @@ def draw_separate_radar(objects, width=400, height=400, current_alert="Safe"):
     return radar
 
 # ==========================================
-# [모듈 4] 메인 실행
+# [모듈 4] 메인 시스템 실행
 # ==========================================
-def run_system(cap, H):
-    print("\n시스템 가동! (초기화: r / 종료: q)")
-    try:
-        model = YOLO(MODEL_PATH)
-    except:
-        print(f"모델 파일({MODEL_PATH})을 찾을 수 없습니다. yolov8n.pt로 대체합니다.")
-        model = YOLO("yolov8n.pt")
+def run_system(picam2, H):
+    print("\n🚀 시스템 가동! (종료: q, 리셋: r)")
     
+    # YOLO 모델 로드 (pt 파일 사용)
+    model = YOLO(MODEL_PATH) 
+
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("카메라 끊김!")
-            break
-        
-        results = model.predict(frame, classes=[0], verbose=False)
+        # Picamera2에서 프레임 가져오기
+        frame = picam2.capture_array()
+        h, w = frame.shape[:2]
+
+        results = model(frame, verbose=False, conf=0.5)
         detected_objects = []
         max_alert = "Safe"
 
         for result in results:
-            for box in result.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                foot_u, foot_v = (x1 + x2) / 2, y2
-                
-                point_pixel = np.array([[[foot_u, foot_v]]], dtype=np.float32)
-                point_real = cv2.perspectiveTransform(point_pixel, H)
-                
-                real_x = point_real[0][0][0]
-                real_z = point_real[0][0][1]
-                
-                if real_z < 1.5:
-                    status = "DANGER"
-                    color = (0, 0, 255)
-                    max_alert = status
-                elif real_z < 2.5:
-                    status = "WARNING"
-                    color = (0, 165, 255)
-                    if max_alert != "DANGER": max_alert = status
-                else:
-                    status = "Safe"
-                    color = (0, 255, 0)
-                
-                detected_objects.append((real_x, real_z, status))
+            if result.keypoints is not None:
+                boxes = result.boxes.xyxy.cpu().numpy()
+                for i, box in enumerate(boxes):
+                    x1, y1, x2, y2 = map(int, box)
+                    box_h = y2 - y1
+                    
+                    foot_u, foot_v, pose_type = get_foot_point(result.keypoints[i], box_h)
+                    
+                    if foot_u is not None:
+                        real_x, dist, method = calculate_distance_hybrid(foot_u, foot_v, box_h, h, H)
+                        
+                        if dist < 1.5:
+                            status = "DANGER"
+                            color = (0, 0, 255)
+                            max_alert = status
+                        elif dist < 2.5:
+                            status = "WARNING"
+                            color = (0, 165, 255)
+                            if max_alert != "DANGER": max_alert = status
+                        else:
+                            status = "Safe"
+                            color = (0, 255, 0)
+                        
+                        detected_objects.append((real_x, dist, status))
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, f"{status} {real_z:.2f}m", (x1, y1-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.circle(frame, (int(foot_u), int(foot_v)), 5, (0, 255, 255), -1)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(frame, f"{status} {dist:.2f}m", (x1, y1-10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        cv2.circle(frame, (int(foot_u), int(foot_v)), 5, (0, 255, 255), -1)
 
         radar_img = draw_separate_radar(detected_objects, current_alert=max_alert)
 
@@ -196,24 +249,8 @@ def run_system(cap, H):
 # 메인 진입점
 # ==========================================
 def main():
-    print("📷 카메라 초기화 중...")
-    # [핵심] 라즈베리 파이 호환성 코드 (V4L2 백엔드 사용)
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    
-    # 해상도 안전하게 설정 (640x480)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    
-    # 카메라가 켜질 때까지 잠시 대기
-    time.sleep(2)
-
-    if not cap.isOpened():
-        print("카메라를 열 수 없습니다!")
-        print("   1. USB 카메라가 연결되어 있는지 확인하세요.")
-        print("   2. 라즈베리 파이 설정(raspi-config)에서 카메라가 켜져 있는지 확인하세요.")
-        return
-
-    print("카메라 연결 성공!")
+    # 카메라 초기화
+    picam2 = init_camera()
 
     while True:
         if os.path.exists(CONFIG_FILE):
@@ -221,19 +258,18 @@ def main():
                 pixel_points = np.load(CONFIG_FILE)
                 print("설정 파일 로드됨.")
             except:
-                print("설정 파일 깨짐. 다시 캘리브레이션 합니다.")
-                pixel_points = run_calibration(cap)
+                pixel_points = run_calibration(picam2)
         else:
-            pixel_points = run_calibration(cap)
+            pixel_points = run_calibration(picam2)
         
         H = compute_homography(pixel_points)
         
-        status = run_system(cap, H)
+        status = run_system(picam2, H)
         
         if status == "EXIT":
             break
         
-    cap.release()
+    picam2.stop()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
