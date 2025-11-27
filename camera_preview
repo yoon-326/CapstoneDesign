@@ -1,23 +1,40 @@
 from picamera2 import Picamera2
 import cv2
+import time
 
-# PiCamera 초기화
-picam2 = Picamera2()
+# -----------------------------
+# 카메라 0, 카메라 1 초기화
+# -----------------------------
+cam0 = Picamera2(0)
+cam1 = Picamera2(1)
 
-# 미리보기 해상도 설정,,,,,
-config = picam2.create_preview_configuration(main={"size": (1280, 720)})
-picam2.configure(config)
-picam2.start()
+# 해상도 설정
+config0 = cam0.create_preview_configuration(main={"size": (1280, 720)})
+config1 = cam1.create_preview_configuration(main={"size": (1280, 720)})
 
-print("📷 PiCamera 미리보기 시작 (종료: 'q' 키) macmac")
+cam0.configure(config0)
+cam1.configure(config1)
+
+cam0.start()
+cam1.start()
+
+print("📷 Camera0 · Camera1 Preview 시작 (종료: 'q')")
+
+# 카메라 안정화 시간
+time.sleep(0.2)
 
 while True:
-    frame = picam2.capture_array()
-    cv2.imshow("PiCamera2 Preview", frame)
+    frame0 = cam0.capture_array()
+    frame1 = cam1.capture_array()
 
+    cv2.imshow("Camera 0", frame0)
+    cv2.imshow("Camera 1", frame1)
+
+    # 종료 키
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-picam2.stop()
+cam0.stop()
+cam1.stop()
 cv2.destroyAllWindows()
-print("✅ 미리보기 종료")
+print("✅ 두 카메라 미리보기 종료")
