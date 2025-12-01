@@ -8,7 +8,8 @@ CONFIG_FILE = "camera_config.npy"
 def init_camera():
     print("[캘리브레이션] 카메라 초기화 중...")
     picam2 = Picamera2()
-    config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "BGR888"})
+    # [핵심] 해상도를 1640x1232로 설정하여 전체 시야(Full FOV) 확보
+    config = picam2.create_preview_configuration(main={"size": (1640,1232), "format": "BGR888"})
     picam2.configure(config)
     picam2.start()
     time.sleep(2)
@@ -16,7 +17,7 @@ def init_camera():
 
 def main():
     picam2 = init_camera()
-    print("\n=== [캘리브레이션 모드] ===")
+    print("\n=== [캘리브레이션 모드 - Wide View] ===")
     print("바닥의 1m, 2m, 3m, 4m 지점을 순서대로 클릭하세요.")
     
     clicked_points = []
@@ -24,6 +25,7 @@ def main():
     def mouse_callback(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             if len(clicked_points) < 4:
+                # 좌표는 리사이즈된 640x480 화면 기준으로 찍힙니다.
                 print(f"포인트 {len(clicked_points)+1} 입력: [{x}, {y}]")
                 clicked_points.append([x, y])
 
@@ -33,7 +35,11 @@ def main():
 
     try:
         while True:
-            frame = picam2.capture_array()
+            # 1. 고해상도 원본 캡처 (넓은 시야)
+            raw_frame = picam2.capture_array()
+            
+            # 2. 화면 출력 및 좌표 설정을 위해 640x480으로 압축 (시야 유지됨)
+            frame = cv2.resize(raw_frame, (640, 480))
             
             # 안내 텍스트
             cv2.putText(frame, f"Points: {len(clicked_points)}/4", (20, 40), 
@@ -52,7 +58,7 @@ def main():
                 cv2.waitKey(1000)
                 pts_array = np.array(clicked_points, dtype=np.float32)
                 np.save(CONFIG_FILE, pts_array)
-                print(f"{CONFIG_FILE} 저장됨.")
+                print(f"{CONFIG_FILE} 저장됨 (640x480 기준).")
                 break
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
