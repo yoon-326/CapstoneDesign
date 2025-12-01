@@ -9,12 +9,13 @@ from scipy.optimize import curve_fit
 model = YOLO("yolov8n-pose.pt")
 
 # ==========================================
-# [함수] 카메라 초기화
+# [함수] 카메라 초기화 (Wide View)
 # ==========================================
 def init_camera():
     print("[파라미터 통합 산출] 카메라 초기화 중...")
     picam2 = Picamera2()
-    config = picam2.create_preview_configuration(main={"size": (640, 480), "format": "BGR888"})
+    # [수정] 1280x960 (4:3) 설정으로 센서 전체 시야 확보 (크롭 방지)
+    config = picam2.create_preview_configuration(main={"size": (1640,1232), "format": "BGR888"})
     picam2.configure(config)
     picam2.start()
     time.sleep(2)
@@ -50,23 +51,29 @@ def main():
     torso_data = []      # 상반신 길이 (픽셀)
     real_dist_data = []  # 실제 거리 (미터)
     
-    # 측정할 거리 목록 (1m ~ 5m)
-    # 정확도를 위해 1.5m, 2.5m 등 중간값도 찍으면 더 좋습니다.
-    target_distances = [1.0, 2.0, 3.0, 4.0, 5.0]
+    # 측정할 거리 목록 (정확도를 위해 1m ~ 4m 사이를 촘촘히 하는 것 권장)
+    target_distances = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
     current_idx = 0
     
     print("\n" + "="*40)
-    print("파라미터 자동 산출 모드")
+    print("파라미터 자동 산출 모드 (Wide View)")
     print("화면의 지시에 따라 거리를 맞추고 'Space' 키를 누르세요.")
     print("="*40)
     
     try:
         while current_idx < len(target_distances):
-            frame = picam2.capture_array()
+            # 1. 고해상도 원본 캡처
+            raw_frame = picam2.capture_array()
+            
+            # 2. 640x480으로 리사이징
+            # 메인 코드에서 640x480 기준으로 거리를 계산하므로, 
+            # 여기서 데이터를 수집할 때도 똑같은 크기여야 합니다.
+            frame = cv2.resize(raw_frame, (640, 480))
+            
             target_dist = target_distances[current_idx]
             
             # 가이드 텍스트
-            msg = f"Distance: {target_dist}m -> Press SPACE"
+            msg = f"Target: {target_dist}m -> Press SPACE"
             cv2.putText(frame, msg, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
             # 현재 수집된 데이터 개수 표시
@@ -78,6 +85,7 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             
             if key == 32: # Spacebar
+                # 3. 리사이즈된 프레임(frame)을 모델에 입력
                 results = model(frame, verbose=False)
                 
                 # 가장 크고 선명한 사람 찾기
@@ -87,7 +95,6 @@ def main():
                 for result in results:
                     if result.keypoints is not None:
                         for i in range(len(result.keypoints)):
-                            # 단일 객체 키포인트 래핑 처리
                             temp_wrapper = type('', (), {})()
                             temp_wrapper.data = result.keypoints.data[i].unsqueeze(0)
                             
@@ -101,9 +108,9 @@ def main():
                     real_dist_data.append(target_dist)
                     print(f"[OK] 거리 {target_dist}m : 상반신 {max_torso:.1f}px")
                     current_idx += 1
-                    time.sleep(0.5) # 중복 입력 방지
+                    time.sleep(0.5) 
                 else:
-                    print("사람을 찾지 못했습니다. 다시 시도하세요.")
+                    print("사람을 찾지 못했습니다. 전신이 잘 보이게 서주세요.")
             
             elif key == ord('q'):
                 print("중단됨.")
@@ -113,7 +120,7 @@ def main():
         cv2.destroyAllWindows()
 
         # --------------------------------------------
-        # ★ [핵심] 데이터 분석 및 계수 산출
+        # 데이터 분석 및 계수 산출
         # --------------------------------------------
         if len(torso_data) >= 5:
             print("\n데이터 분석 중...")
@@ -121,36 +128,29 @@ def main():
             X = np.array(torso_data)
             y = np.array(real_dist_data)
             
-            # 1. 1차 공식 계수 (Alpha, Beta) 찾기
+            # 1. 1차 공식 계수 (Alpha, Beta)
             popt, _ = curve_fit(inverse_func, X, y)
             alpha, beta = popt
             
-            # 2. 1차 공식으로 예측값 생성
+            # 2. 1차 예측값 생성
             y_pred_1st = (alpha / X) + beta
             
-            # 3. 2차 보정 계수 (a, b, c) 찾기
-            # 입력: 1차 예측값(y_pred_1st), 정답: 실제 거리(y)
-            # y_real = a * (y_pred)^2 + b * (y_pred) + c
+            # 3. 2차 보정 계수 (a, b, c)
             coeffs = np.polyfit(y_pred_1st, y, 2)
             a, b, c = coeffs
             
-            # --------------------------------------------
-            # 결과 출력 (복사하기 좋게 포맷팅)
-            # --------------------------------------------
             print("\n" + "="*50)
-            print("[최종 결과] 아래 내용을 main.py에 복사해 넣으세요!")
+            print("[최종 결과] 아래 내용을 main.py의 설정 부분에 붙여넣으세요!")
             print("="*50)
-            print("# [1] 통계 공식 계수 (1차)")
             print(f"ALPHA = {alpha:.2f}")
             print(f"BETA  = {beta:.2f}")
-            print("\n# [2] 2차 곡선 보정 계수")
-            print(f"CORRECT_A = {a:.6f}")
+            print(f"\nCORRECT_A = {a:.6f}")
             print(f"CORRECT_B = {b:.6f}")
             print(f"CORRECT_C = {c:.6f}")
             print("="*50)
             
         else:
-            print("데이터가 부족하여 계산할 수 없습니다.")
+            print("데이터가 부족합니다.")
 
     except Exception as e:
         print(f"에러 발생: {e}")
