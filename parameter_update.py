@@ -6,7 +6,7 @@ from ultralytics import YOLO
 from scipy.optimize import curve_fit
 
 # 모델 로드
-model = YOLO("yolov8n-pose.pt")
+model = YOLO("figure_pose.pt")
 
 # ==========================================
 # [함수] 카메라 초기화 (Wide View)
@@ -15,7 +15,7 @@ def init_camera():
     print("[파라미터 통합 산출] 카메라 초기화 중...")
     picam2 = Picamera2()
     # [수정] 1280x960 (4:3) 설정으로 센서 전체 시야 확보 (크롭 방지)
-    config = picam2.create_preview_configuration(main={"size": (1640,1232), "format": "BGR888"})
+    config = picam2.create_preview_configuration(main={"size": (1640, 1232), "format": "BGR888"})
     picam2.configure(config)
     picam2.start()
     time.sleep(2)
@@ -27,15 +27,21 @@ def init_camera():
 def get_torso_length(keypoints):
     """ 어깨 중점 ~ 골반 중점 길이 (상반신) """
     kps = keypoints.data[0].cpu().numpy()
-    l_sh, r_sh = kps[5], kps[6]
-    l_hip, r_hip = kps[11], kps[12]
     
-    # 신뢰도 체크
+    # 8개 관절 모델 기준 인덱스
+    # 0: Left Shoulder, 1: Right Shoulder
+    # 2: Left Hip,      3: Right Hip
+    l_sh, r_sh = kps[0], kps[1]
+    l_hip, r_hip = kps[2], kps[3]
+    
+    # 신뢰도 체크 (0.5 미만이면 무시)
     if l_sh[2] < 0.5 or r_sh[2] < 0.5 or l_hip[2] < 0.5 or r_hip[2] < 0.5:
         return None
     
     shoulder_y = (l_sh[1] + r_sh[1]) / 2
     hip_y = (l_hip[1] + r_hip[1]) / 2
+    
+    # 절대값 반환 (y축이 아래로 갈수록 커지므로)
     return abs(hip_y - shoulder_y)
 
 # 1차 공식 함수 형태 (반비례)
@@ -66,7 +72,7 @@ def main():
             raw_frame = picam2.capture_array()
             
             # 2. 640x480으로 리사이징
-            # 메인 코드에서 640x480 기준으로 거리를 계산하므로, 
+            # 메인 코드에서 640x480 기준으로 거리를 계산하므로,
             # 여기서 데이터를 수집할 때도 똑같은 크기여야 합니다.
             frame = cv2.resize(raw_frame, (640, 480))
             
@@ -108,7 +114,7 @@ def main():
                     real_dist_data.append(target_dist)
                     print(f"[OK] 거리 {target_dist}m : 상반신 {max_torso:.1f}px")
                     current_idx += 1
-                    time.sleep(0.5) 
+                    time.sleep(0.5)
                 else:
                     print("사람을 찾지 못했습니다. 전신이 잘 보이게 서주세요.")
             

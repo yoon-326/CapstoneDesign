@@ -2,7 +2,7 @@ import time
 import os
 import cv2
 import numpy as np
-import subprocess 
+import subprocess
 from ultralytics import YOLO
 
 # Picamera2 로드
@@ -16,7 +16,7 @@ except ImportError:
 # [1] 설정: 상수 및 파라미터
 # ==========================================
 CONFIG_FILE = "camera_config.npy"
-MODEL_PATH = "yolov8n-pose.pt"
+MODEL_PATH = "figure_pose.pt"
 
 # 캘리브레이션 실제 거리 (1m~4m)
 REAL_POINTS_BASE = np.array([
@@ -24,12 +24,12 @@ REAL_POINTS_BASE = np.array([
 ], dtype=np.float32)
 
 # 현장 맞춤형 계수
-ALPHA = 545.62 
+ALPHA = 545.62
 BETA = 3.15
 
 # 2차 보정 계수
-CORRECT_A, CORRECT_B, CORRECT_C = 0, 1, 0 
-REALITY_SCALE = 1.0 
+CORRECT_A, CORRECT_B, CORRECT_C = 0, 1, 0
+REALITY_SCALE = 1.0
 
 # ==========================================
 # [모듈 0] 초기화
@@ -45,7 +45,7 @@ def check_calibration():
         print("설정 파일 로드됨.")
 
 def init_camera():
-    print("메인 시스템 카메라 초기화 (Wide View)...")
+    print("📷 메인 시스템 카메라 초기화 (Wide View)...")
     picam2 = Picamera2()
     config = picam2.create_preview_configuration(main={"size": (1640, 1232), "format": "BGR888"})
     picam2.configure(config)
@@ -60,8 +60,8 @@ def compute_homography(pixel_points):
     pixels = pixel_points.tolist()
     reals = REAL_POINTS_BASE.tolist()
     p1 = pixels[0]
-    pixels.append([p1[0] + 100.0, p1[1]]) 
-    reals.append([0.5, 1.0]) 
+    pixels.append([p1[0] + 100.0, p1[1]])
+    reals.append([0.5, 1.0])
     src = np.array(pixels, dtype=np.float32)
     dst = np.array(reals, dtype=np.float32)
     H, _ = cv2.findHomography(src, dst)
@@ -69,12 +69,15 @@ def compute_homography(pixel_points):
 
 def get_features(keypoints, box_h):
     kps = keypoints.data[0].cpu().numpy()
-    # 9개 점 모델 기준 인덱스
-    l_sh, r_sh = kps[1], kps[2]
-    l_hip, r_hip = kps[3], kps[4]
-    l_knee, r_knee = kps[5], kps[6]
-    l_ankle, r_ankle = kps[7], kps[8]
+    
+    # 8개 점 모델 기준 (0~7번 인덱스)
+    # 순서: [0:L_Sh, 1:R_Sh, 2:L_Hip, 3:R_Hip, 4:L_Knee, 5:R_Knee, 6:L_Ankle, 7:R_Ankle]
+    l_sh, r_sh = kps[0], kps[1]
+    l_hip, r_hip = kps[2], kps[3]
+    l_knee, r_knee = kps[4], kps[5]
+    l_ankle, r_ankle = kps[6], kps[7]
 
+    # 1. 발 위치 (발목 우선, 안 보이면 무릎 대체)
     foot_pt = None
     if l_ankle[2] > 0.5 or r_ankle[2] > 0.5:
         pts = [p[:2] for p in [l_ankle, r_ankle] if p[2] > 0.5]
@@ -84,6 +87,7 @@ def get_features(keypoints, box_h):
         avg = np.mean(pts, axis=0)
         foot_pt = [avg[0], avg[1] + (box_h * 0.25)]
 
+    # 2. 상반신 길이 (어깨 - 골반)
     torso_len = None
     if l_sh[2] > 0.5 or r_sh[2] > 0.5 or l_hip[2] > 0.5 or r_hip[2] > 0.5:
         sh_ys = [p[1] for p in [l_sh, r_sh] if p[2] > 0.5]
