@@ -2,16 +2,28 @@ import cv2
 import time
 from picamera2 import Picamera2
 
-def init_camera():
+def init_camera1():
     """Picamera2 초기화"""
-    picam2 = Picamera2()
+    picam2 = Picamera2(camera_num=0)
     config = picam2.create_video_configuration(
         main={"size": (1640, 1232), "format": "RGB888"}
     )
     picam2.configure(config)
     picam2.start()
     time.sleep(0.4)
-    print("Camera initialized.")
+    print("Camera initialized01")
+    return picam2
+
+def init_camera2():
+    """Picamera2 초기화"""
+    picam2 = Picamera2(camera_num=1)
+    config = picam2.create_video_configuration(
+        main={"size": (1270, 720), "format": "RGB888"}
+    )
+    picam2.configure(config)
+    picam2.start()
+    time.sleep(0.4)
+    print("Camera initialized02")
     return picam2
 
 

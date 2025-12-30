@@ -3,6 +3,34 @@ import numpy as np
 from PIL import Image
 from math import ceil
 
+# def correct_pitch_distortion(observed_angle_deg, camera_pitch_deg=30):
+#     """
+#     카메라가 위에서 내려다볼 때(Pitch) 발생하는 각도 왜곡을 보정합니다.
+    
+#     Args:
+#         observed_angle_deg: OpenCV로 측정한 각도 (도 단위)
+#         camera_pitch_deg: 카메라가 내려다보는 각도 (기본 30도)
+        
+#     Returns:
+#         보정된 실제 각도 (도 단위)
+#     """
+#     if observed_angle_deg == 0:
+#         return 0.0
+        
+#     # 1. 라디안 변환
+#     obs_rad = np.radians(observed_angle_deg)
+#     pitch_rad = np.radians(camera_pitch_deg)
+    
+#     # 2. 보정 공식 적용: tan(real) = tan(obs) * cos(pitch)
+#     # 코사인 값만큼 수직 길이가 압축되었으므로, 탄젠트 값에 코사인을 곱해 기울기를 완만하게 만듦
+#     real_tan = np.tan(obs_rad) * np.cos(pitch_rad)
+    
+#     # 3. 아크탄젠트로 다시 각도 변환
+#     real_rad = np.arctan(real_tan)
+#     real_deg = np.degrees(real_rad)
+    
+#     return real_deg
+
 def detect_pallet_tilt(image_input, mean_threshold=3.0, std_threshold=2.0):
     """
     실시간용 빠른 기울기 계산 함수 (그래프 없음).
@@ -46,33 +74,36 @@ def analyze_tilt_fast(roi_img, tilt_threshold=10):
 
     return "NORMAL", (0, 255, 0), angle
 
-def analyze_tilt_hough(roi_img, tilt_threshold=3.0, std_threshold=2.0):
+def analyze_tilt_hough(roi_img, shift_min=2.0, shift_max=6.0, std_threshold=1.5):
     """
-    기존의 Hough Line 변환 방식을 사용하여 기울기를 정밀하게 분석합니다.
-    최신 코드 포맷에 맞춰 (status, color, angle) 3개의 값을 반환합니다.
+    화물의 미세한 쏠림(Shifting) 현상을 정밀 감지하는 함수.
+    
+    Args:
+        roi_img: 입력 이미지
+        shift_min: 쏠림으로 판단할 최소 각도 (이 이하는 정상)
+        shift_max: 쏠림 감지 최대 각도 (이 이상은 이미 쓰러진 것으로 간주하여 별도 처리)
+        std_threshold: 신뢰도 기준 (표준편차가 이보다 작아야 '진짜 쏠림'으로 인정)
+        
+    Returns:
+        (status_str, color_bgr, angle_float)
     """
     
-    # 1. 입력 예외 처리 (반환값 3개 유지)
+    # 1. 입력 예외 처리
+    image = None
     if isinstance(roi_img, str):
         image = cv2.imread(roi_img)
     elif isinstance(roi_img, Image.Image):
-        image = np.array(roi_img)
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        temp = np.array(roi_img)
+        image = cv2.cvtColor(temp, cv2.COLOR_RGB2BGR)
     elif isinstance(roi_img, np.ndarray):
         image = roi_img
-    else:
-        return "Error: Invalid Input", (0, 0, 0), 0.0
-
-    if image is None:
-        return "Error: Image None", (0, 0, 0), 0.0
+    
+    if image is None: return "Error: Image None", (0, 0, 0), 0.0
 
     # 2. 전처리 (Resize -> Canny)
     target_height = 800
     h, w = image.shape[:2]
-    
-    # 이미지가 너무 작거나 비어있는 경우 방지
-    if h == 0 or w == 0:
-        return "Error: Empty Frame", (0, 0, 0), 0.0
+    if h == 0 or w == 0: return "Error: Empty Frame", (0, 0, 0), 0.0
 
     scale = target_height / h
     image_resized = cv2.resize(image, (int(w * scale), target_height))
@@ -86,7 +117,7 @@ def analyze_tilt_hough(roi_img, tilt_threshold=3.0, std_threshold=2.0):
         edges,
         rho=1,
         theta=np.pi / 180,
-        threshold=80,
+        threshold=120,
         minLineLength=target_height / 10,
         maxLineGap=20
     )
@@ -99,39 +130,40 @@ def analyze_tilt_hough(roi_img, tilt_threshold=3.0, std_threshold=2.0):
             dx = float(x2 - x1)
             dy = float(y2 - y1)
             
-            # 수직에 가까운 선만 추출 (가로선 무시)
-            if dy == 0 or abs(dx) > abs(dy):
-                continue
+            if dy == 0 or abs(dx) > abs(dy): continue
                 
             angle_rad = np.arctan(dx / dy)
-            angle_deg = np.degrees(angle_rad) # 절대값 처리 전 각도
+            angle_deg = np.degrees(angle_rad)
             
-            # 각도 절대값 (기울기 정도)
+            # [중요] 정밀 감지를 위해 ceil(올림) 제거하고 float 유지
             abs_angle = abs(angle_deg)
             
-            if abs_angle > 45: # 45도 이상은 노이즈로 간주
-                continue
+            if abs_angle > 45: continue # 노이즈 제거
                 
             angles.append(abs_angle)
 
-    # 4. 결과 분석 및 반환 (항상 3개 값 반환)
+    # 4. 결과 분석 (Logic Refactoring)
     if not angles:
-        # 선이 검출되지 않음 -> 정상으로 간주하거나 별도 처리
         return "NORMAL (No lines)", (0, 255, 0), 0.0
 
-    avg_angle = np.mean(angles)
-    std_dev_angle = np.std(angles)
+    avg_angle = np.mean(angles)    # 기울기 (얼마나?)
+    std_dev = np.std(angles)       # 신뢰도 (확실해?)
+    # --- 판단 로직 (User Logic) ---
+    
+    # CASE 1: 너무 극단적으로 기울어짐 -> 쏠림 감지 대상 아님 (이미 사고)
+    if avg_angle > shift_max:
+        return f"DANGER: EXTREME ({avg_angle:.1f}°)", (0, 0, 255), avg_angle
 
-    # 논리 판단
-    is_tilted = avg_angle > tilt_threshold
-    is_unstable = std_dev_angle > std_threshold
-
-    if is_tilted:
-        # 기울어짐 (빨강)
-        return "WARNING: TILTED", (0, 0, 255), avg_angle
-    elif is_unstable:
-        # 흔들림/불안정 (주황)
-        return "WARNING: UNSTABLE", (0, 165, 255), avg_angle
-    else:
-        # 정상 (초록)
+    # CASE 2: 정상 범위 (너무 미미함)
+    if avg_angle < shift_min:
         return "NORMAL", (0, 255, 0), avg_angle
+
+    # CASE 3: 쏠림 의심 구간 (shift_min ~ shift_max 사이)
+    # 여기서 표준편차가 '거름망' 역할을 함
+    
+    if std_dev < std_threshold:
+        # 평균은 떴는데, 편차가 작다? -> "모든 선이 쏠림을 가리킴" (진짜)
+        return f"WARNING: SHIFTING ({avg_angle:.1f}°)", (0, 165, 255), avg_angle
+    else:
+        # 평균은 떴는데, 편차가 크다? -> "덜컹거려서 평균이 튄 것" (가짜/진동)
+        return f"NORMAL (Vibration) ({avg_angle:.1f}°)", (0, 255, 0), avg_angle

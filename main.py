@@ -8,7 +8,7 @@ import cv2
 
 # YOLOE 및 기능 모듈 임포트
 from src.models.yoloe_loader import load_yoloe_model
-from src.common.camera_input import init_camera, get_frame
+from src.common.camera_input import init_camera1, init_camera2, get_frame
 from src.detection.object_detection import run_inference
 from src.tilt.tilt_detection import analyze_tilt_fast, analyze_tilt_hough
 from src.common.visualization import draw_box, draw_label, show_frame
@@ -69,6 +69,7 @@ def car_stopped_task(picam2):
         # --- [실제 작업 영역] ---
         # print("car stopped: detecting tilt...")
         frame = get_frame(picam2)
+        frame = cv2.flip(frame, -1)
         frame_count += 1
         result = run_inference(model, frame, frame_count)
 
@@ -100,13 +101,15 @@ if __name__ == "__main__":
         md.initialize_bmi160()
     except Exception as e:
         print(f"센서 초기화 실패, 안전 모드(MOVING)로 시작: {e}")
+
     
-    picam2 = init_camera()
+    picam0 = init_camera1()
+    picam1 = init_camera2()
     # picam2.start() # [삭제] init_camera 내부에서 이미 start()를 호출함
 
     # 스레드 생성 (인자 통일)
-    t1 = threading.Thread(target=car_moved_task, args=(picam2,), daemon=True)
-    t2 = threading.Thread(target=car_stopped_task, args=(picam2,), daemon=True)
+    t1 = threading.Thread(target=car_moved_task, args=(picam0,), daemon=True)
+    t2 = threading.Thread(target=car_stopped_task, args=(picam1,), daemon=True)
     
     t1.start()
     t2.start()

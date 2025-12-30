@@ -5,7 +5,7 @@ from scipy.optimize import curve_fit
 
 # [통합 모듈 임포트]
 # 프로젝트 구조에 맞춰 src 폴더에서 가져옵니다.
-from src.common.camera_input import init_camera, get_frame
+from src.common.camera_input import init_camera1, get_frame
 from src.models.pose_loader import load_pose_model
 
 # ==========================================
@@ -50,13 +50,13 @@ def main():
     # 2. 통합 카메라 초기화
     # (src/common/camera_input.py의 설정을 그대로 사용)
     # 이미 1640x1232로 설정되어 있음
-    picam2 = init_camera()
+    picam2 = init_camera1()
     
     torso_data = []      # 상반신 길이 (픽셀)
     real_dist_data = []  # 실제 거리 (미터)
     
     # 측정할 거리 목록
-    target_distances = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+    target_distances = [1.0, 1.5, 2.0, 2.5, 3.0]
     current_idx = 0
     
     print("\n" + "="*40)
